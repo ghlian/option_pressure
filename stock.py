@@ -8,7 +8,7 @@ import configparser
 import calendar
 
 config = configparser.RawConfigParser()
-config.read("sql_statements.ini")
+config.read("sql_statements.cfg")
 
 c = calendar.Calendar(firstweekday=calendar.SUNDAY)
 
@@ -23,18 +23,20 @@ class stock():
         self.trades_df = trades_df
         self.symbol = symbol
         self.pressure = None
-        self.hold_days = 3
+        self.hold_days = 5
         self.strike = None
 
-        self.get_exp_date(date)
-        if hasattr(self, 'expiration'):
-            self.options = self.get_options(date)
+        #print(symbol, date, exp_dates, trades_df)
 
-        if self.strike and hasattr(self, "calls") and hasattr(self, "puts"):
+        self.get_exp_date(date)
+        try:
+            self.options = self.get_options(date)
             self.get_option_pressure()
             self.get_roi(date)
+        except:
+            return
 
-        if hasattr(self, "call_roi") and hasattr(self, "put_roi"):  # store results. will be stored in db later
+        if hasattr(self, "call_roi") and hasattr(self, "put_roi") and self.call_interest is not None and self.put_interest is not None:  # store results. will be stored in db later
             self.result = [self.symbol, date.strftime('%Y-%m-%d'), self.pressure, self.call_interest, self.put_interest, self.call_roi, self.put_roi]
 
     # Gets the nearest expiration date for the trade
@@ -61,6 +63,8 @@ class stock():
         else:
             self.expiration = self.exp_dates.iloc[1]['Expiration_Date']
 
+        #print(self.expiration)
+
 
     # Gets the options available around nearest strike price
     def get_options(self, date):
@@ -71,7 +75,8 @@ class stock():
             return
 
         self.strike = round(float(options.iloc[0]['Last_Stock_Price']))  # round the last stock price
-        last_price_index = options[(options['strike']==self.strike) & (options['Type_Option']=='C')].index[0]
+
+        last_price_index = options[(options['Strike']==self.strike) & (options['Type_Option']=='C')].index[0]
         options = options.iloc[last_price_index-4:last_price_index+6]
 
         self.calls = options[options['Type_Option']=="C"]
@@ -80,46 +85,48 @@ class stock():
         if len(self.calls)!=len(self.puts):
             return None
 
-        self.call_trade = options[(options['Type_Option']=="C") & (options['strike']==self.strike)].iloc[0]
-        self.put_trade = options[(options['Type_Option']=="P") & (options['strike']==self.strike)].iloc[0]
-        self.call_interest = self.call_trade['open_int']
-        self.put_interest = self.put_trade['open_int']
+        self.call_trade = options[(options['Type_Option']=="C") & (options['Strike']==self.strike)].iloc[0]
+        self.put_trade = options[(options['Type_Option']=="P") & (options['Strike']==self.strike)].iloc[0]
+        self.call_interest = self.call_trade['Open_Int']
+        self.put_interest = self.put_trade['Open_Int']
 
         return options
 
     # Returns option pressure function I created
     def get_option_pressure(self):
-            call_pressure = self.calls[['ask','bid']].sum()
-            call_pressure = call_pressure['ask'] + call_pressure['bid']
-            put_pressure = self.puts[['ask','bid']].sum()
-            put_pressure = put_pressure['ask'] + put_pressure['bid']
+            call_pressure = self.calls[['Ask','Bid']].sum()
+            call_pressure = call_pressure['Ask'] + call_pressure['Bid']
+            put_pressure = self.puts[['Ask','Bid']].sum()
+            put_pressure = put_pressure['Ask'] + put_pressure['Bid']
             try:
                 self.pressure = call_pressure/(call_pressure+put_pressure)
+                #print(self.pressure, call_pressure, put_pressure)
+                #input()
             except:
                 pass
 
     # Returns the ROI on the call and put trade
     def get_roi(self, date):
-        sql = config['get_roi']['sql'].format(self.symbol, self.end_date.strftime("%Y-%m-%d"), self.expiration, self.strike)
-        df = pd.read_sql(sql, read_con)
+        sql_call = config['get_roi']['sql'].format(self.call_trade['Ref_Num'], self.end_date.strftime("%Y-%m-%d"))
+        sql_put = config['get_roi']['sql'].format(self.put_trade['Ref_Num'], self.end_date.strftime("%Y-%m-%d"))
 
-        if not df.empty:
-            print(self.call_trade)
-            buy_price = float(self.call_trade['Last_Option_Price'])
-            sell_price = float(df.iloc[0]['Last_Option_Price'])
-            self.call_roi = (sell_price-buy_price)/buy_price
+        df_call = pd.read_sql(sql_call, read_con)
+        df_put = pd.read_sql(sql_put, read_con)
 
-            buy_price = float(self.put_trade['Last_Option_Price'])
-            sell_price = float(df.iloc[1]['Last_Option_Price'])
-            self.put_roi = (sell_price-buy_price)/buy_price
+        if not df_call.empty and not df_put.empty:
+            buy_price_call = float(self.call_trade['Ask'])
+            sell_price_call = float(df_call.iloc[0]['Bid'])
+
+            buy_price_put = float(self.put_trade['Ask'])
+            sell_price_put = float(df_put.iloc[0]['Bid'])
+
+            try:
+                self.call_roi = (sell_price_call-buy_price_call)/buy_price_call
+                self.put_roi = (sell_price_put-buy_price_put)/buy_price_put
+            except:
+                pass
+
 
     def store_trade(self, trades_df):
         if trades_df is None:
             trades_df = pd.DataFrame(columns = trade_columns)
-
-    # Returns the week of the month for the specified date.
-    def week_of_month(self,dt):
-        first_day = dt.replace(day=1)
-        dom = dt.day
-        adjusted_dom = dom + first_day.weekday()
-        return int(ceil(adjusted_dom/7.0))
